@@ -1,0 +1,542 @@
+import AppKit
+
+public final class EditorTextView: NSTextView {
+    public override var acceptsFirstResponder: Bool { true }
+    public override var mouseDownCanMoveWindow: Bool { false }
+    public override var isOpaque: Bool { false }
+
+    public var onTextChange: ((String) -> Void)?
+
+    /// Reference to the editor settings. Must be set before using the text view.
+    public weak var settings: EditorSettings?
+
+    private var listsAllowed: Bool {
+        guard let coordinator = delegate as? SyntaxHighlightCoordinator else { return true }
+        let lang = coordinator.language
+        return lang == "plain" || lang == "markdown"
+    }
+
+    public override func mouseDown(with event: NSEvent) {
+        // Click on a highlighted link — open in browser
+        if handleLinkClick(event: event) { return }
+
+        // Check if click lands on a checkbox region
+        if let settings, listsAllowed, settings.checklistsEnabled, handleCheckboxClick(event: event) { return }
+
+        super.mouseDown(with: event)
+    }
+
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        registerForDraggedTypes([.fileURL])
+        updateLinkTrackingArea()
+    }
+
+    // MARK: - Link hover cursor
+
+    private var linkTrackingArea: NSTrackingArea?
+
+    private func updateLinkTrackingArea() {
+        if let existing = linkTrackingArea { removeTrackingArea(existing) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        linkTrackingArea = area
+    }
+
+    private func isOverLink(at point: NSPoint) -> Bool {
+        guard let settings, settings.clickableLinks else { return false }
+        let charIndex = characterIndexForInsertion(at: point)
+        guard let storage = textStorage, charIndex < storage.length else { return false }
+        return storage.attribute(SyntaxHighlightCoordinator.linkURLKey, at: charIndex, effectiveRange: nil) != nil
+    }
+
+    public override func mouseMoved(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if isOverLink(at: point) {
+            NSCursor.pointingHand.set()
+        } else {
+            super.mouseMoved(with: event)
+        }
+    }
+
+    // MARK: - Word wrap
+
+    public var wrapsLines: Bool {
+        get { textContainer?.widthTracksTextView ?? false }
+        set {
+            guard newValue != wrapsLines,
+                  let textContainer,
+                  let scrollView = enclosingScrollView else { return }
+
+            let visibleRange = self.visibleRange
+
+            scrollView.hasHorizontalScroller = !newValue
+            isHorizontallyResizable = !newValue
+
+            if newValue {
+                let clipWidth = scrollView.contentView.bounds.width
+                frame.size.width = clipWidth
+                textContainer.size.width = clipWidth
+                textContainer.widthTracksTextView = true
+            } else {
+                textContainer.widthTracksTextView = false
+                textContainer.size = CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            }
+
+            // Reset horizontal scroll and force layout recalculation
+            let clipOrigin = scrollView.contentView.bounds.origin
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: clipOrigin.y))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            needsLayout = true
+            needsDisplay = true
+
+            if let visibleRange {
+                scrollRangeToVisible(visibleRange)
+            }
+        }
+    }
+
+    private var visibleRange: NSRange? {
+        guard let layoutManager, let textContainer else { return nil }
+        let visibleRect = self.visibleRect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y)
+        let glyphRange = layoutManager.glyphRange(forBoundingRectWithoutAdditionalLayout: visibleRect, in: textContainer)
+        return layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+    }
+
+    // MARK: - Layout fix for word-wrapped lines
+
+    public override func didChangeText() {
+        super.didChangeText()
+        if wrapsLines, let layoutManager, let textContainer {
+            // Only force layout for visible region — full-document ensureLayout is O(n) and blocks the main thread
+            let visibleRect = self.visibleRect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y)
+            let glyphRange = layoutManager.glyphRange(forBoundingRectWithoutAdditionalLayout: visibleRect, in: textContainer)
+            let charRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+            // Extend slightly past visible to avoid flicker during fast scrolling
+            let end = min(charRange.location + charRange.length + 2000, (string as NSString).length)
+            layoutManager.ensureLayout(forCharacterRange: NSRange(location: charRange.location, length: end - charRange.location))
+        }
+    }
+
+    // MARK: - Typing helpers
+
+    public override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        guard let s = insertString as? String else {
+            super.insertText(insertString, replacementRange: replacementRange)
+            return
+        }
+
+        guard let settings else {
+            super.insertText(insertString, replacementRange: replacementRange)
+            return
+        }
+
+        // Auto-indent on newline (list-aware)
+        if s == "\n" {
+            let ns = (string as NSString)
+            let sel = selectedRange()
+            let lineRange = ns.lineRange(for: NSRange(location: sel.location, length: 0))
+            let currentLine = ns.substring(with: NSRange(
+                location: lineRange.location,
+                length: max(0, sel.location - lineRange.location)
+            ))
+
+            if listsAllowed, let match = ListHelper.parseLine(currentLine), ListHelper.isKindEnabled(match.kind, settings: settings) {
+                if ListHelper.isEmptyItem(currentLine, match: match) {
+                    // Empty list item — remove prefix, exit list mode
+                    let prefixRange = NSRange(location: lineRange.location, length: currentLine.count)
+                    if shouldChangeText(in: prefixRange, replacementString: "") {
+                        textStorage?.replaceCharacters(in: prefixRange, with: "")
+                        didChangeText()
+                        setSelectedRange(NSRange(location: lineRange.location, length: 0))
+                    }
+                } else {
+                    // Continue list with next prefix
+                    let next = ListHelper.nextPrefix(for: match)
+                    super.insertText("\n" + next, replacementRange: replacementRange)
+                }
+                return
+            }
+
+            let indent = currentLine.prefix { $0 == " " || $0 == "\t" }
+            super.insertText("\n" + indent, replacementRange: replacementRange)
+            return
+        }
+
+        // Tab key — indent selection or indent list line
+        if s == "\t" {
+            let sel = selectedRange()
+            if sel.length > 0 {
+                indentSelectedLines()
+                return
+            }
+            // On a list line, indent the whole line instead of inserting a tab
+            let ns = string as NSString
+            let lineRange = ns.lineRange(for: NSRange(location: sel.location, length: 0))
+            let lineText = ns.substring(with: lineRange)
+            let cleanLine = lineText.hasSuffix("\n") ? String(lineText.dropLast()) : lineText
+            if listsAllowed, let listMatch = ListHelper.parseLine(cleanLine), ListHelper.isKindEnabled(listMatch.kind, settings: settings) {
+                let indent = settings.indentString
+                let insertRange = NSRange(location: lineRange.location, length: 0)
+                if shouldChangeText(in: insertRange, replacementString: indent) {
+                    textStorage?.replaceCharacters(in: insertRange, with: indent)
+                    didChangeText()
+                    setSelectedRange(NSRange(location: sel.location + indent.count, length: 0))
+                }
+                return
+            }
+            if settings.indentUsingSpaces {
+                let spaces = String(repeating: " ", count: settings.tabWidth)
+                super.insertText(spaces, replacementRange: replacementRange)
+            } else {
+                super.insertText("\t", replacementRange: replacementRange)
+            }
+            return
+        }
+
+        // Auto-close bracket pairs
+        let pairs: [String: String] = ["(": ")", "[": "]", "{": "}"]
+        if let closing = pairs[s] {
+            let sel = selectedRange()
+            super.insertText(s + closing, replacementRange: replacementRange)
+            setSelectedRange(NSRange(location: sel.location + 1, length: 0))
+            return
+        }
+
+        super.insertText(insertString, replacementRange: replacementRange)
+    }
+
+    public override func deleteBackward(_ sender: Any?) {
+        let sel = selectedRange()
+        guard sel.length == 0, sel.location > 0 else {
+            super.deleteBackward(sender)
+            return
+        }
+
+        guard let settings else {
+            super.deleteBackward(sender)
+            return
+        }
+
+        let ns = string as NSString
+        let lineRange = ns.lineRange(for: NSRange(location: sel.location, length: 0))
+        let columnOffset = sel.location - lineRange.location
+
+        // Check if cursor is at content start of a list item — remove the prefix
+        let lineText = ns.substring(with: lineRange)
+        let cleanLine = lineText.hasSuffix("\n") ? String(lineText.dropLast()) : lineText
+        if listsAllowed, let match = ListHelper.parseLine(cleanLine), ListHelper.isKindEnabled(match.kind, settings: settings), columnOffset == match.contentStart {
+            let prefixRange = NSRange(location: lineRange.location, length: match.contentStart)
+            if shouldChangeText(in: prefixRange, replacementString: match.indent) {
+                textStorage?.replaceCharacters(in: prefixRange, with: match.indent)
+                didChangeText()
+                setSelectedRange(NSRange(location: lineRange.location + match.indent.count, length: 0))
+            }
+            return
+        }
+
+        guard settings.indentUsingSpaces else {
+            super.deleteBackward(sender)
+            return
+        }
+
+        let textBeforeCursor = ns.substring(with: NSRange(location: lineRange.location, length: columnOffset))
+
+        // Only act if everything before cursor on this line is spaces
+        guard !textBeforeCursor.isEmpty, textBeforeCursor.allSatisfy({ $0 == " " }) else {
+            super.deleteBackward(sender)
+            return
+        }
+
+        let width = settings.tabWidth
+        let toDelete = ((columnOffset - 1) % width) + 1
+        let deleteRange = NSRange(location: sel.location - toDelete, length: toDelete)
+        if shouldChangeText(in: deleteRange, replacementString: "") {
+            textStorage?.replaceCharacters(in: deleteRange, with: "")
+            didChangeText()
+            setSelectedRange(NSRange(location: deleteRange.location, length: 0))
+        }
+    }
+
+    // MARK: - Block indent / unindent
+
+    public override func insertBacktab(_ sender: Any?) {
+        let sel = selectedRange()
+        if sel.length > 0 {
+            unindentSelectedLines()
+        } else {
+            unindentCurrentLine()
+        }
+    }
+
+    private func indentSelectedLines() {
+        guard let settings else { return }
+        let indent = settings.indentString
+        let ns = string as NSString
+        let sel = selectedRange()
+        let lineRange = ns.lineRange(for: sel)
+
+        var newText = ""
+        ns.substring(with: lineRange).enumerateLines { line, _ in
+            newText += indent + line + "\n"
+        }
+        // Remove trailing newline if original didn't end with one
+        if lineRange.location + lineRange.length <= ns.length,
+           !ns.substring(with: lineRange).hasSuffix("\n") {
+            newText = String(newText.dropLast())
+        }
+
+        if shouldChangeText(in: lineRange, replacementString: newText) {
+            textStorage?.replaceCharacters(in: lineRange, with: newText)
+            didChangeText()
+            setSelectedRange(NSRange(location: lineRange.location, length: newText.count))
+        }
+    }
+
+    private func unindentCurrentLine() {
+        guard let settings else { return }
+        let width = settings.tabWidth
+        let ns = string as NSString
+        let sel = selectedRange()
+        let lineRange = ns.lineRange(for: NSRange(location: sel.location, length: 0))
+        let line = ns.substring(with: lineRange)
+
+        let toRemove: Int
+        if line.hasPrefix("\t") {
+            toRemove = 1
+        } else {
+            let spaces = line.prefix { $0 == " " }
+            toRemove = min(spaces.count, width)
+        }
+        guard toRemove > 0 else { return }
+
+        let removeRange = NSRange(location: lineRange.location, length: toRemove)
+        if shouldChangeText(in: removeRange, replacementString: "") {
+            textStorage?.replaceCharacters(in: removeRange, with: "")
+            didChangeText()
+            setSelectedRange(NSRange(location: max(lineRange.location, sel.location - toRemove), length: 0))
+        }
+    }
+
+    private func unindentSelectedLines() {
+        guard let settings else { return }
+        let width = settings.tabWidth
+        let ns = string as NSString
+        let sel = selectedRange()
+        let lineRange = ns.lineRange(for: sel)
+
+        var newText = ""
+        ns.substring(with: lineRange).enumerateLines { line, _ in
+            if line.hasPrefix("\t") {
+                newText += String(line.dropFirst()) + "\n"
+            } else {
+                let spaces = line.prefix { $0 == " " }
+                let toRemove = min(spaces.count, width)
+                newText += String(line.dropFirst(toRemove)) + "\n"
+            }
+        }
+        if lineRange.location + lineRange.length <= ns.length,
+           !ns.substring(with: lineRange).hasSuffix("\n") {
+            newText = String(newText.dropLast())
+        }
+
+        if shouldChangeText(in: lineRange, replacementString: newText) {
+            textStorage?.replaceCharacters(in: lineRange, with: newText)
+            didChangeText()
+            setSelectedRange(NSRange(location: lineRange.location, length: newText.count))
+        }
+    }
+
+    // MARK: - Fn+Up / Fn+Down: move cursor, not just scroll
+
+    public override func scrollPageDown(_ sender: Any?) {
+        guard let scrollView = enclosingScrollView else { return }
+        let clip = scrollView.contentView
+        let pageHeight = clip.bounds.height
+        let newY = min(clip.bounds.origin.y + pageHeight, frame.height - pageHeight)
+        clip.scroll(to: NSPoint(x: 0, y: max(0, newY)))
+        scrollView.reflectScrolledClipView(clip)
+        let cursorY = clip.bounds.origin.y + textContainerOrigin.y
+        setSelectedRange(NSRange(location: characterIndexForInsertion(at: NSPoint(x: textContainerOrigin.x, y: cursorY)), length: 0))
+    }
+
+    public override func scrollPageUp(_ sender: Any?) {
+        guard let scrollView = enclosingScrollView else { return }
+        let clip = scrollView.contentView
+        let pageHeight = clip.bounds.height
+        let newY = max(clip.bounds.origin.y - pageHeight, 0)
+        clip.scroll(to: NSPoint(x: 0, y: newY))
+        scrollView.reflectScrolledClipView(clip)
+        let cursorY = clip.bounds.origin.y + textContainerOrigin.y
+        setSelectedRange(NSRange(location: characterIndexForInsertion(at: NSPoint(x: textContainerOrigin.x, y: cursorY)), length: 0))
+    }
+
+    // MARK: - Key commands
+
+    public override func keyDown(with event: NSEvent) {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let key = event.charactersIgnoringModifiers ?? ""
+
+        // Cmd+D — duplicate line
+        if mods == .command, key == "d" {
+            duplicateLine()
+            return
+        }
+
+        // Cmd+Return — toggle checkbox
+        if mods == .command, event.keyCode == 36, listsAllowed, settings?.checklistsEnabled == true {
+            toggleCheckbox()
+            return
+        }
+
+        // Cmd+Shift+L — toggle checklist
+        if mods == [.command, .shift], key.lowercased() == "l", listsAllowed, settings?.checklistsEnabled == true {
+            toggleChecklist()
+            return
+        }
+
+        // Cmd+Option+Up — move line up
+        if mods == [.command, .option], event.keyCode == 126 {
+            moveLine(.up)
+            return
+        }
+
+        // Cmd+Option+Down — move line down
+        if mods == [.command, .option], event.keyCode == 125 {
+            moveLine(.down)
+            return
+        }
+
+        super.keyDown(with: event)
+    }
+
+    // MARK: - List helpers
+
+    private func handleLinkClick(event: NSEvent) -> Bool {
+        let point = convert(event.locationInWindow, from: nil)
+        let charIndex = characterIndexForInsertion(at: point)
+        guard let storage = textStorage, charIndex < storage.length else { return false }
+
+        guard let urlString = storage.attribute(SyntaxHighlightCoordinator.linkURLKey, at: charIndex, effectiveRange: nil) as? String,
+              let url = URL(string: urlString) else { return false }
+
+        NSWorkspace.shared.open(url)
+        return true
+    }
+
+    private func handleCheckboxClick(event: NSEvent) -> Bool {
+        let point = convert(event.locationInWindow, from: nil)
+        let charIndex = characterIndexForInsertion(at: point)
+        let ns = string as NSString
+        guard charIndex < ns.length else { return false }
+
+        let lineRange = ns.lineRange(for: NSRange(location: charIndex, length: 0))
+        let lineText = ns.substring(with: lineRange)
+        let cleanLine = lineText.hasSuffix("\n") ? String(lineText.dropLast()) : lineText
+
+        guard let match = ListHelper.parseLine(cleanLine) else { return false }
+        guard match.kind == .unchecked || match.kind == .checked else { return false }
+
+        // Check if click is in the bracket region "[ ]" or "[x]"
+        let bracketStart = lineRange.location + match.contentStart - 4 // "[ ] " → bracket starts 4 chars before content
+        let bracketEnd = bracketStart + 3 // 3 chars: "[", " "/" x", "]"
+        guard charIndex >= bracketStart && charIndex < bracketEnd else { return false }
+
+        let toggled = ListHelper.toggleCheckbox(in: cleanLine)
+        let replaceRange = NSRange(location: lineRange.location, length: cleanLine.count)
+        if shouldChangeText(in: replaceRange, replacementString: toggled) {
+            textStorage?.replaceCharacters(in: replaceRange, with: toggled)
+            didChangeText()
+        }
+        return true
+    }
+
+    private func toggleCheckbox() {
+        let ns = string as NSString
+        let sel = selectedRange()
+        let lineRange = ns.lineRange(for: NSRange(location: sel.location, length: 0))
+        let lineText = ns.substring(with: lineRange)
+        let cleanLine = lineText.hasSuffix("\n") ? String(lineText.dropLast()) : lineText
+
+        let toggled = ListHelper.toggleCheckbox(in: cleanLine)
+        guard toggled != cleanLine else { return }
+
+        let replaceRange = NSRange(location: lineRange.location, length: cleanLine.count)
+        if shouldChangeText(in: replaceRange, replacementString: toggled) {
+            textStorage?.replaceCharacters(in: replaceRange, with: toggled)
+            didChangeText()
+            let safeLoc = min(sel.location, lineRange.location + toggled.count)
+            setSelectedRange(NSRange(location: safeLoc, length: 0))
+        }
+    }
+
+    public func toggleChecklist() {
+        guard let settings, listsAllowed, settings.checklistsEnabled else { return }
+        let ns = string as NSString
+        let sel = selectedRange()
+        let lineRange = ns.lineRange(for: sel)
+
+        var newLines: [String] = []
+        let blockText = ns.substring(with: lineRange)
+        blockText.enumerateLines { line, _ in
+            newLines.append(ListHelper.toggleChecklist(line: line))
+        }
+
+        var newText = newLines.joined(separator: "\n")
+        if blockText.hasSuffix("\n") { newText += "\n" }
+
+        if shouldChangeText(in: lineRange, replacementString: newText) {
+            textStorage?.replaceCharacters(in: lineRange, with: newText)
+            didChangeText()
+            setSelectedRange(NSRange(location: lineRange.location, length: newText.count - (blockText.hasSuffix("\n") ? 1 : 0)))
+        }
+    }
+
+    public func moveLine(_ direction: MoveDirection) {
+        let ns = string as NSString
+        let sel = selectedRange()
+        let lineRange = ns.lineRange(for: NSRange(location: sel.location, length: 0))
+
+        guard let result = ListHelper.swapLines(string, lineRange: lineRange, direction: direction) else { return }
+
+        let fullRange = NSRange(location: 0, length: ns.length)
+        if shouldChangeText(in: fullRange, replacementString: result.newText) {
+            textStorage?.replaceCharacters(in: fullRange, with: result.newText)
+            didChangeText()
+            let cursorOffset = sel.location - lineRange.location
+            setSelectedRange(NSRange(location: result.newSelection.location + cursorOffset, length: 0))
+        }
+    }
+
+    // MARK: - Duplicate line (Cmd+D)
+
+    private func duplicateLine() {
+        let ns = string as NSString
+        let sel = selectedRange()
+        let lineRange = ns.lineRange(for: sel)
+        let lineText = ns.substring(with: lineRange)
+
+        let insertAt: Int
+        let insertion: String
+        if lineText.hasSuffix("\n") {
+            insertAt = lineRange.location + lineRange.length
+            insertion = lineText
+        } else {
+            insertAt = lineRange.location + lineRange.length
+            insertion = "\n" + lineText
+        }
+
+        let insertRange = NSRange(location: insertAt, length: 0)
+        if shouldChangeText(in: insertRange, replacementString: insertion) {
+            textStorage?.replaceCharacters(in: insertRange, with: insertion)
+            didChangeText()
+            let newCursorPos = sel.location + insertion.count
+            setSelectedRange(NSRange(location: newCursorPos, length: sel.length))
+        }
+    }
+}
