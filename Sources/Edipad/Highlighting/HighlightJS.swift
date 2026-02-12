@@ -136,6 +136,25 @@ public class HighlightJS {
             var attrs: [NSAttributedString.Key: Any] = [:]
             if let c = props["color"] { attrs[.foregroundColor] = colorFromCSS(c) }
             if let c = props["background-color"] { attrs[.backgroundColor] = colorFromCSS(c) }
+
+            // Handle font-style: italic
+            if let fontStyle = props["font-style"], fontStyle == "italic" {
+                attrs[.obliqueness] = 0.15 // Italic slant
+            }
+
+            // Handle font-weight: bold/700
+            if let fontWeight = props["font-weight"] {
+                if fontWeight == "bold" || fontWeight == "700" || Int(fontWeight) ?? 0 >= 700 {
+                    // Bold will be applied via font traits in currentAttrs
+                    attrs[.expansion] = 0.0 // Mark for bold (we'll handle in currentAttrs)
+                }
+            }
+
+            // Handle text-decoration: underline
+            if let textDecoration = props["text-decoration"], textDecoration.contains("underline") {
+                attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
+            }
+
             guard !attrs.isEmpty else { continue }
 
             if let key = normalizeSelector(selector) {
@@ -258,6 +277,15 @@ public class HighlightJS {
                 if let style = themeDict[cls] {
                     attrs.merge(style) { _, new in new }
                 }
+            }
+        }
+
+        // Apply bold font if expansion attribute is present (used as marker for bold)
+        if attrs[.expansion] != nil {
+            attrs.removeValue(forKey: .expansion)
+            if let baseFont = attrs[.font] as? NSFont ?? codeFont as? NSFont {
+                let boldFont = NSFontManager.shared.convert(baseFont, toHaveTrait: .boldFontMask)
+                attrs[.font] = boldFont
             }
         }
 

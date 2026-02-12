@@ -153,6 +153,7 @@ public class SyntaxHighlightCoordinator: NSObject, NSTextViewDelegate {
 
                 // Apply bullet dash highlighting on top
                 self.applyListMarkers(tv: tv, text: textSnapshot, theme: currentTheme, settings: currentSettings)
+                self.applyMarkdownFormatting(tv: tv, text: textSnapshot, font: userFont)
                 self.applyLinkHighlighting(tv: tv, text: textSnapshot, theme: currentTheme, settings: currentSettings)
 
                 tv.textStorage?.endEditing()
@@ -185,6 +186,7 @@ public class SyntaxHighlightCoordinator: NSObject, NSTextViewDelegate {
         ], range: fullRange)
 
         applyListMarkers(tv: tv, text: text, theme: theme, settings: settings)
+        applyMarkdownFormatting(tv: tv, text: text, font: font)
         applyLinkHighlighting(tv: tv, text: text, theme: theme, settings: settings)
 
         tv.textStorage?.endEditing()
@@ -218,6 +220,33 @@ public class SyntaxHighlightCoordinator: NSObject, NSTextViewDelegate {
     private static let checkboxRegex = try! NSRegularExpression(
         pattern: "^([ \\t]*[-*] )(\\[[ x]\\])( )(.*)",
         options: .anchorsMatchLines
+    )
+
+    // Pre-compiled regex for markdown formatting
+    // Note: Bold must be checked before italic to avoid matching ** as two *
+    private static let boldRegex = try! NSRegularExpression(
+        pattern: "\\*\\*(?=\\S)(.+?)(?<=\\S)\\*\\*|__(?=\\S)(.+?)(?<=\\S)__",
+        options: []
+    )
+    private static let italicRegex = try! NSRegularExpression(
+        pattern: "(?<!\\*)\\*(?=\\S)(.+?)(?<=\\S)\\*(?!\\*)|(?<!_)_(?=\\S)(.+?)(?<=\\S)_(?!_)",
+        options: []
+    )
+    private static let strikethroughRegex = try! NSRegularExpression(
+        pattern: "~~(?=\\S)(.+?)(?<=\\S)~~",
+        options: []
+    )
+
+    // Inline code: `code` (non-greedy, matches shortest)
+    private static let inlineCodeRegex = try! NSRegularExpression(
+        pattern: "`[^`]+`",
+        options: []
+    )
+
+    // Code blocks: ```language\n...\n```
+    private static let codeBlockRegex = try! NSRegularExpression(
+        pattern: "```[\\s\\S]*?```",
+        options: []
     )
 
     private func applyListMarkers(tv: EditorTextView, text: String, theme: EditorTheme, settings: EditorSettings?) {
@@ -264,6 +293,166 @@ public class SyntaxHighlightCoordinator: NSObject, NSTextViewDelegate {
                     tv.textStorage?.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: contentRange)
                     tv.textStorage?.addAttribute(.strikethroughColor, value: theme.foreground.withAlphaComponent(0.4), range: contentRange)
                 }
+            }
+        }
+    }
+
+    private func highlightCodeBlock(_ blockText: String, baseFont: NSFont, fullMatch: NSRange) -> NSAttributedString? {
+        // Parse language from ```language
+        let lines = blockText.components(separatedBy: .newlines)
+        guard lines.count > 2 else { return nil }
+
+        // First line is ```language
+        let firstLine = lines[0].trimmingCharacters(in: .whitespaces)
+        guard firstLine.hasPrefix("```") else { return nil }
+
+        let lang = String(firstLine.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+        let detectedLang = lang.isEmpty ? "plaintext" : lang
+
+        // Extract code content (everything between first and last line)
+        let codeLines = lines.dropFirst().dropLast()
+        let codeContent = codeLines.joined(separator: "\n")
+
+        // Highlight the code
+        guard let hlLang = LanguageDetector.shared.highlightrLanguage(for: detectedLang) else {
+            return nil
+        }
+
+        let highlightJS = Self.highlightJS
+        var highlighted: NSAttributedString?
+
+        Self.highlightQueue.sync {
+            highlightJS.setCodeFont(baseFont)
+            highlighted = highlightJS.highlight(codeContent, as: hlLang)
+        }
+
+        return highlighted
+    }
+
+    private func applyMarkdownFormatting(tv: EditorTextView, text: String, font: NSFont) {
+        guard language == "plain" || language == "markdown" else { return }
+
+        let ns = text as NSString
+        let fullRange = NSRange(location: 0, length: ns.length)
+
+        // Track code ranges to avoid formatting inside code
+        var codeRanges: [NSRange] = []
+
+        // Get theme for background color
+        let theme = self.theme
+
+        // Apply code blocks first (```...```)
+        for match in Self.codeBlockRegex.matches(in: text, range: fullRange) {
+            let fullMatch = match.range
+            codeRanges.append(fullMatch)
+
+            // Apply subtle background to code blocks, line by line for full width
+            let bgColor = theme.isDark
+                ? NSColor.white.withAlphaComponent(0.05)
+                : NSColor.black.withAlphaComponent(0.05)
+
+            // Apply background line by line to ensure full width coverage
+            var lineStart = fullMatch.location
+            let blockEnd = fullMatch.location + fullMatch.length
+            while lineStart < blockEnd {
+                let lineRange = ns.lineRange(for: NSRange(location: lineStart, length: 0))
+                // Intersect with the code block range
+                let effectiveRange = NSIntersectionRange(lineRange, fullMatch)
+                if effectiveRange.length > 0 {
+                    tv.textStorage?.addAttribute(.backgroundColor, value: bgColor, range: lineRange)
+                }
+                lineStart = lineRange.location + lineRange.length
+            }
+
+            // Parse and highlight syntax inside code block
+            let blockText = ns.substring(with: fullMatch)
+            if let highlighted = highlightCodeBlock(blockText, baseFont: font, fullMatch: fullMatch) {
+                // Apply syntax highlighting to code content (skip fence lines)
+                // Find first newline (end of opening fence)
+                if let firstNewline = blockText.firstIndex(of: "\n") {
+                    let contentStart = blockText.distance(from: blockText.startIndex, to: blockText.index(after: firstNewline))
+                    // Find last ``` (closing fence)
+                    if let lastFence = blockText.range(of: "```", options: .backwards) {
+                        let contentEnd = blockText.distance(from: blockText.startIndex, to: lastFence.lowerBound)
+                        if contentEnd > contentStart {
+                            let contentRange = NSRange(
+                                location: fullMatch.location + contentStart,
+                                length: contentEnd - contentStart
+                            )
+                            // Apply highlighted attributes
+                            tv.textStorage?.beginEditing()
+                            highlighted.enumerateAttributes(in: NSRange(location: 0, length: highlighted.length), options: []) { attrs, range, _ in
+                                let targetRange = NSRange(
+                                    location: contentRange.location + range.location,
+                                    length: range.length
+                                )
+                                if targetRange.location + targetRange.length <= ns.length {
+                                    for (key, value) in attrs where key == .foregroundColor || key == .font {
+                                        tv.textStorage?.addAttribute(key, value: value, range: targetRange)
+                                    }
+                                }
+                            }
+                            tv.textStorage?.endEditing()
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply inline code (`code`)
+        for match in Self.inlineCodeRegex.matches(in: text, range: fullRange) {
+            let fullMatch = match.range
+            // Skip if inside a code block
+            let insideCodeBlock = codeRanges.contains { NSIntersectionRange($0, fullMatch).length > 0 }
+            if !insideCodeBlock {
+                codeRanges.append(fullMatch)
+                // Apply subtle background to inline code
+                let bgColor = theme.isDark
+                    ? NSColor.white.withAlphaComponent(0.08)
+                    : NSColor.black.withAlphaComponent(0.08)
+                tv.textStorage?.addAttribute(.backgroundColor, value: bgColor, range: fullMatch)
+            }
+        }
+
+        // Track formatted ranges to avoid conflicts (bold takes precedence over italic)
+        var formattedRanges: [NSRange] = []
+        formattedRanges.append(contentsOf: codeRanges)
+
+        // Helper to check if range overlaps with code
+        let isInsideCode = { (range: NSRange) -> Bool in
+            return codeRanges.contains { NSIntersectionRange($0, range).length > 0 }
+        }
+
+        // Apply bold first (**text** or __text__)
+        for match in Self.boldRegex.matches(in: text, range: fullRange) {
+            let fullMatch = match.range
+            if !isInsideCode(fullMatch) {
+                formattedRanges.append(fullMatch)
+                // Create bold font
+                let boldFont = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+                tv.textStorage?.addAttribute(.font, value: boldFont, range: fullMatch)
+            }
+        }
+
+        // Apply italic (*text* or _text_) - skip ranges already formatted as bold
+        for match in Self.italicRegex.matches(in: text, range: fullRange) {
+            let fullMatch = match.range
+            // Check if this range overlaps with any bold range or code
+            let overlaps = formattedRanges.contains { NSIntersectionRange($0, fullMatch).length > 0 }
+            if !overlaps {
+                formattedRanges.append(fullMatch)
+                // Create italic font
+                let italicFont = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+                tv.textStorage?.addAttribute(.font, value: italicFont, range: fullMatch)
+            }
+        }
+
+        // Apply strikethrough (~~text~~)
+        for match in Self.strikethroughRegex.matches(in: text, range: fullRange) {
+            let fullMatch = match.range
+            if !isInsideCode(fullMatch) {
+                // Apply strikethrough to the entire matched text (including markers)
+                tv.textStorage?.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: fullMatch)
             }
         }
     }

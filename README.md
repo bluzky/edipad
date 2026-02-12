@@ -2,14 +2,17 @@
 
 A reusable macOS code editor component with syntax highlighting, built with Swift and SwiftUI.
 
+![Edipad Editor](docs/assets/edipad.jpg)
+
 ## Features
 
 - **185+ languages** syntax highlighting via highlight.js
+- **Markdown formatting**: bold, italic, strikethrough, inline code, and code blocks with syntax highlighting
 - **Line numbers** with smart width calculation
 - **Word wrap** with hanging indent for lists
 - **Markdown lists**: bullets, numbered lists, and checklists
 - **Clickable links** with hover cursor
-- **Theme support**: light, dark, and system appearance
+- **Theme support**: light, dark, and system appearance with Atom One default themes
 - **Custom themes**: bring your own highlight.js CSS themes
 - **Customizable settings** via protocol-based configuration
 
