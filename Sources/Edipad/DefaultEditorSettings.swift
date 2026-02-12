@@ -16,6 +16,7 @@ public final class DefaultEditorSettings: EditorSettings, ObservableObject {
     @Published public var checklistsEnabled: Bool
     @Published public var clickableLinks: Bool
     @Published public var appearanceOverride: String
+    @Published public var customThemeConfig: ThemeConfiguration?
 
     private var cancellables = Set<AnyCancellable>()
     private let settingsChangedSubject = PassthroughSubject<Void, Never>()
@@ -35,7 +36,8 @@ public final class DefaultEditorSettings: EditorSettings, ObservableObject {
         numberedListsEnabled: Bool = true,
         checklistsEnabled: Bool = true,
         clickableLinks: Bool = true,
-        appearanceOverride: String = "system"
+        appearanceOverride: String = "system",
+        customThemeConfig: ThemeConfiguration? = nil
     ) {
         self.font = font
         self.showLineNumbers = showLineNumbers
@@ -48,6 +50,7 @@ public final class DefaultEditorSettings: EditorSettings, ObservableObject {
         self.checklistsEnabled = checklistsEnabled
         self.clickableLinks = clickableLinks
         self.appearanceOverride = appearanceOverride
+        self.customThemeConfig = customThemeConfig
 
         setupObservers()
     }

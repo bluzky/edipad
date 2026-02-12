@@ -10,6 +10,7 @@ A reusable macOS code editor component with syntax highlighting, built with Swif
 - **Markdown lists**: bullets, numbered lists, and checklists
 - **Clickable links** with hover cursor
 - **Theme support**: light, dark, and system appearance
+- **Custom themes**: bring your own highlight.js CSS themes
 - **Customizable settings** via protocol-based configuration
 
 ## Installation
@@ -68,6 +69,49 @@ EditorView(
     settings: settings
 )
 ```
+
+### Custom Themes
+
+Edipad supports custom themes via CSS files. You can provide your own highlight.js themes:
+
+```swift
+// Option 1: Load from CSS file paths
+let darkCSS = URL(fileURLWithPath: "/path/to/dark-theme.css")
+let lightCSS = URL(fileURLWithPath: "/path/to/light-theme.css")
+
+if let themeConfig = ThemeConfiguration.fromCSS(
+    darkCSSPath: darkCSS,
+    lightCSSPath: lightCSS
+) {
+    let settings = DefaultEditorSettings(
+        customThemeConfig: themeConfig
+    )
+
+    EditorView(content: $content, language: $language, settings: settings)
+}
+
+// Option 2: Manual configuration
+let darkTheme = EditorTheme(
+    isDark: true,
+    background: NSColor(red: 0.1, green: 0.1, blue: 0.12, alpha: 1.0),
+    foreground: NSColor(red: 0.9, green: 0.9, blue: 0.9, alpha: 1.0),
+    cssPath: URL(fileURLWithPath: "/path/to/dark-syntax.css")
+)
+
+let lightTheme = EditorTheme(
+    isDark: false,
+    background: .white,
+    foreground: .black,
+    cssPath: URL(fileURLWithPath: "/path/to/light-syntax.css")
+)
+
+let themeConfig = ThemeConfiguration(darkTheme: darkTheme, lightTheme: lightTheme)
+let settings = DefaultEditorSettings(customThemeConfig: themeConfig)
+```
+
+If no custom theme is provided, Edipad uses the built-in Atom One themes.
+
+See [CUSTOM_THEMES.md](CUSTOM_THEMES.md) for detailed documentation and more examples.
 
 ### Supported Languages
 

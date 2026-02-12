@@ -34,7 +34,23 @@ public class SyntaxHighlightCoordinator: NSObject, NSTextViewDelegate {
 
     public func updateTheme() {
         let appearance = settings?.appearanceOverride ?? "system"
-        theme = EditorTheme.current(for: appearance)
+
+        // Use custom theme if provided, otherwise use default
+        if let customConfig = settings?.customThemeConfig {
+            let isDark: Bool
+            switch appearance {
+            case "light":
+                isDark = false
+            case "dark":
+                isDark = true
+            default:
+                isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            }
+            theme = isDark ? customConfig.darkTheme : customConfig.lightTheme
+        } else {
+            theme = EditorTheme.current(for: appearance)
+        }
+
         applyTheme()
         lastAppearance = nil
         rehighlight()
@@ -42,11 +58,17 @@ public class SyntaxHighlightCoordinator: NSObject, NSTextViewDelegate {
 
     private func applyTheme() {
         let isDark = theme.isDark
-        let themeName = isDark ? "itsypad-dark.min" : "itsypad-light.min"
         let currentFont = font
 
         Self.highlightQueue.sync {
-            _ = Self.highlightJS.loadTheme(named: themeName)
+            // Load custom CSS from path if provided, otherwise use bundled theme
+            if let cssPath = theme.cssPath,
+               let cssContent = try? String(contentsOf: cssPath) {
+                Self.highlightJS.setTheme(css: cssContent)
+            } else {
+                let themeName = isDark ? "dark-theme.min" : "light-theme.min"
+                _ = Self.highlightJS.loadTheme(named: themeName)
+            }
             Self.highlightJS.setCodeFont(currentFont)
         }
 

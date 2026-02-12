@@ -1,16 +1,19 @@
 import AppKit
+import Foundation
 
 public struct EditorTheme {
     public let isDark: Bool
     public let background: NSColor
     public let foreground: NSColor
+    public let cssPath: URL?
 
     public var insertionPointColor: NSColor { isDark ? .white : .black }
 
-    public init(isDark: Bool, background: NSColor, foreground: NSColor) {
+    public init(isDark: Bool, background: NSColor, foreground: NSColor, cssPath: URL? = nil) {
         self.isDark = isDark
         self.background = background
         self.foreground = foreground
+        self.cssPath = cssPath
     }
 
     // MARK: - Resolve theme for current appearance setting
@@ -23,30 +26,30 @@ public struct EditorTheme {
         }
     }
 
-    // MARK: - Monokai Pro dark
+    // MARK: - Atom One Dark
 
     public static let dark = EditorTheme(
         isDark: true,
-        background: hex(0x25252c),
-        foreground: hex(0xd4d4d4)
+        background: hex(0x282c34),
+        foreground: hex(0xabb2bf)
     )
 
-    // MARK: - Monokai Pro light (inverted variant)
+    // MARK: - Atom One Light
 
     public static let light = EditorTheme(
         isDark: false,
-        background: hex(0xffffff),
-        foreground: hex(0x403e41)
+        background: hex(0xfafafa),
+        foreground: hex(0x383a42)
     )
 
-    // Bullet-dash color (matches punctuation.special from old captures)
-    public var bulletDashColor: NSColor { isDark ? Self.hex(0xff6188) : Self.hex(0xd3284e) }
+    // Bullet-dash color (hue-5: red)
+    public var bulletDashColor: NSColor { isDark ? Self.hex(0xe06c75) : Self.hex(0xe45649) }
 
-    // Checkbox bracket color
-    public var checkboxColor: NSColor { isDark ? Self.hex(0xab9df2) : Self.hex(0x7c6bb7) }
+    // Checkbox bracket color (hue-3: purple)
+    public var checkboxColor: NSColor { isDark ? Self.hex(0xc678dd) : Self.hex(0xa626a4) }
 
-    // Link color
-    public var linkColor: NSColor { isDark ? Self.hex(0x78b9f2) : Self.hex(0x0969b2) }
+    // Link color (hue-2: blue)
+    public var linkColor: NSColor { isDark ? Self.hex(0x61aeee) : Self.hex(0x4078f2) }
 
     // MARK: - Hex color helper
 
